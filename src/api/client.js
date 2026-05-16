@@ -11,17 +11,25 @@ function normalizeApiBaseURL(envUrl) {
 }
 
 /**
- * Production (Vercel): set VITE_RELATIVE_API=true so requests go to /api on the same domain.
- * Local dev: uses VITE_API_URL or http://localhost:5000/api
+ * Split deploy (frontend + backend on different Vercel URLs):
+ *   VITE_API_URL=https://your-backend.vercel.app
+ *   Do NOT set VITE_RELATIVE_API=true
+ *
+ * Single Vercel project (same domain):
+ *   VITE_RELATIVE_API=true
  */
 function resolveApiBaseURL() {
   if (import.meta.env.VITE_RELATIVE_API === "true") {
     return "/api";
   }
-  if (import.meta.env.DEV && !import.meta.env.VITE_API_URL) {
+  if (import.meta.env.VITE_API_URL) {
+    return normalizeApiBaseURL(import.meta.env.VITE_API_URL);
+  }
+  if (import.meta.env.DEV) {
     return "/api";
   }
-  return normalizeApiBaseURL(import.meta.env.VITE_API_URL);
+  console.warn("[API] VITE_API_URL is not set — defaulting to localhost");
+  return normalizeApiBaseURL("http://localhost:5000");
 }
 
 const baseURL = resolveApiBaseURL();

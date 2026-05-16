@@ -10,6 +10,39 @@ function formatWhen(iso) {
   return new Date(iso).toLocaleString();
 }
 
+/** Prefer rear / environment camera (for scanning class QR on phone). */
+function pickBackCameraId(cameras) {
+  if (!cameras?.length) return null;
+  const back = cameras.find((c) => /back|rear|environment|trás|arrière/i.test(c.label || ""));
+  if (back) return back.id;
+  if (cameras.length > 1) return cameras[cameras.length - 1].id;
+  return cameras[0].id;
+}
+
+const SCANNER_CONFIG = {
+  fps: 10,
+  qrbox: (viewfinderWidth, viewfinderHeight) => {
+    const edge = Math.min(viewfinderWidth, viewfinderHeight);
+    const size = Math.floor(edge * 0.72);
+    return { width: size, height: size };
+  },
+  supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
+};
+
+async function disposeScanner(scanner) {
+  if (!scanner) return;
+  try {
+    await scanner.stop();
+  } catch {
+    /* already stopped */
+  }
+  try {
+    scanner.clear();
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function StudentDashboardPage() {
   const { user } = useAuth();
   const [records, setRecords] = useState([]);
@@ -42,57 +75,54 @@ export default function StudentDashboardPage() {
     let cancelled = false;
     const regionId = "student-qr-reader";
 
+    const onScanSuccess = async (text) => {
+      if (scanBusyRef.current) return;
+      scanBusyRef.current = true;
+      const scanner = scannerRef.current;
+      try {
+        await scanner.pause(true);
+        const { data } = await api.post("/attendance/mark-scan", { qrText: text });
+        await disposeScanner(scanner);
+        scannerRef.current = null;
+        if (cancelled) return;
+        setPhase("idle");
+        setScanOk(data.message || "Attendance marked.");
+        setScanErr("");
+        await loadHistory();
+        historyAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (e) {
+        const m = e.response?.data?.message || e.message || "Scan failed";
+        setScanErr(m);
+        setScanOk("");
+        try {
+          await scanner.resume();
+        } catch {
+          /* ignore */
+        }
+      } finally {
+        scanBusyRef.current = false;
+      }
+    };
+
     async function start() {
       setScanErr("");
       setScanOk("");
       const scanner = new Html5Qrcode(regionId);
       scannerRef.current = scanner;
       try {
-        const cameras = await Html5Qrcode.getCameras();
-        if (cancelled) return;
-        if (!cameras.length) {
-          setScanErr("No camera found on this device.");
-          setPhase("idle");
-          return;
+        try {
+          await scanner.start({ facingMode: "environment" }, SCANNER_CONFIG, onScanSuccess, () => {});
+        } catch {
+          const cameras = await Html5Qrcode.getCameras();
+          if (cancelled) return;
+          if (!cameras.length) {
+            setScanErr("No camera found on this device.");
+            setPhase("idle");
+            return;
+          }
+          const cameraId = pickBackCameraId(cameras);
+          await scanner.start(cameraId, SCANNER_CONFIG, onScanSuccess, () => {});
         }
-        await scanner.start(
-          cameras[0].id,
-          {
-            fps: 6,
-            qrbox: { width: 260, height: 260 },
-            supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
-          },
-          async (text) => {
-            if (scanBusyRef.current) return;
-            scanBusyRef.current = true;
-            try {
-              await scanner.pause(true);
-              const { data } = await api.post("/attendance/mark-scan", { qrText: text });
-              await scanner.stop().catch(() => {});
-              scanner.clear().catch(() => {});
-              scannerRef.current = null;
-              if (cancelled) return;
-              setPhase("idle");
-              const msg = data.message || "Success.";
-              setScanOk(msg);
-              setScanErr("");
-              await loadHistory();
-              historyAnchorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-            } catch (e) {
-              const m = e.response?.data?.message || e.message || "Scan failed";
-              setScanErr(m);
-              setScanOk("");
-              try {
-                await scanner.resume();
-              } catch {
-                /* ignore */
-              }
-            } finally {
-              scanBusyRef.current = false;
-            }
-          },
-          () => {}
-        );
       } catch (e) {
         if (!cancelled) {
           setScanErr(e.message || "Could not start camera. Allow camera access and try again.");
@@ -108,11 +138,7 @@ export default function StudentDashboardPage() {
       scanBusyRef.current = false;
       const s = scannerRef.current;
       scannerRef.current = null;
-      if (s) {
-        s.stop()
-          .then(() => s.clear())
-          .catch(() => {});
-      }
+      disposeScanner(s);
     };
   }, [phase, loadHistory]);
 
